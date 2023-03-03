@@ -1,117 +1,196 @@
-# Configure the AWS Provider
-provider "aws" {
-  region = "us-east-1"
-}
+# VPC Resources
 
-#Retrieve the list of AZs in the current AWS region
-data "aws_availability_zones" "available" {}
-data "aws_region" "current" {}
-
-#Define the VPC 
 resource "aws_vpc" "vpc" {
   cidr_block = var.vpc_cidr
 
   tags = {
-    Name        = var.vpc_name
-    Environment = "demo_environment"
-    Terraform   = "true"
+    Name = "new-vpc"
   }
 }
 
-#Deploy the private subnets
-resource "aws_subnet" "private_subnets" {
-  for_each          = var.private_subnets
-  vpc_id            = aws_vpc.vpc.id
-  cidr_block        = cidrsubnet(var.vpc_cidr, 8, each.value)
-  availability_zone = tolist(data.aws_availability_zones.available.names)[each.value]
-
-  tags = {
-    Name      = each.key
-    Terraform = "true"
-  }
-}
-
-#Deploy the public subnets
-resource "aws_subnet" "public_subnets" {
-  for_each                = var.public_subnets
+#Deploy Subnets
+resource "aws_subnet" "public_subnet" {
   vpc_id                  = aws_vpc.vpc.id
-  cidr_block              = cidrsubnet(var.vpc_cidr, 8, each.value + 100)
-  availability_zone       = tolist(data.aws_availability_zones.available.names)[each.value]
+  cidr_block              = var.public_subnet_cidr[count.index]
+  count                   = 2
   map_public_ip_on_launch = true
-
-  tags = {
-    Name      = each.key
-    Terraform = "true"
-  }
+  availability_zone       = data.aws_availability_zones.available.names[count.index]
 }
 
-#Create route tables for public and private subnets
+resource "aws_subnet" "private_subnet" {
+  vpc_id            = aws_vpc.vpc.id
+  cidr_block        = var.private_subnet_cidr[count.index]
+  count             = 2
+  availability_zone = data.aws_availability_zones.available.names[count.index]
+}
+
+
 resource "aws_route_table" "public_route_table" {
   vpc_id = aws_vpc.vpc.id
 
   route {
     cidr_block = "0.0.0.0/0"
     gateway_id = aws_internet_gateway.internet_gateway.id
-    #nat_gateway_id = aws_nat_gateway.nat_gateway.id
-  }
-  tags = {
-    Name      = "demo_public_rtb"
-    Terraform = "true"
   }
 }
 
+
+resource "aws_internet_gateway" "internet_gateway" {
+  vpc_id = aws_vpc.vpc.id
+  tags = {
+    Name = "new_igw"
+  }
+}
+
+resource "aws_eip" "elastic_ip" {
+    vpc        = true
+  depends_on = [aws_internet_gateway.internet_gateway]
+  tags = {
+    Name = "igw_eip"
+  }
+}
+  
+
+
+#Create nat gateway for 
+resource "aws_nat_gateway" "nat_gateway" {
+  allocation_id     = aws_eip.elastic_ip.id
+  connectivity_type = "public"
+  subnet_id         = aws_subnet.public_subnet[0].id
+}
+
+
+#Route table for private subnets associated with NAT gateway
 resource "aws_route_table" "private_route_table" {
   vpc_id = aws_vpc.vpc.id
 
   route {
-    cidr_block = "0.0.0.0/0"
-    # gateway_id     = aws_internet_gateway.internet_gateway.id
+    cidr_block     = "0.0.0.0/0"
     nat_gateway_id = aws_nat_gateway.nat_gateway.id
   }
-  tags = {
-    Name      = "demo_private_rtb"
-    Terraform = "true"
-  }
+
 }
 
-#Create route table associations
-resource "aws_route_table_association" "public" {
-  depends_on     = [aws_subnet.public_subnets]
+resource "aws_route_table_association" "public_route_assoc" {
+  count          = 2
+  subnet_id      = aws_subnet.public_subnet[count.index].id
   route_table_id = aws_route_table.public_route_table.id
-  for_each       = aws_subnet.public_subnets
-  subnet_id      = each.value.id
 }
 
-resource "aws_route_table_association" "private" {
-  depends_on     = [aws_subnet.private_subnets]
+resource "aws_route_table_association" "private_route_assoc" {
+  count          = 2
+  subnet_id      = aws_subnet.private_subnet[count.index].id
   route_table_id = aws_route_table.private_route_table.id
-  for_each       = aws_subnet.private_subnets
-  subnet_id      = each.value.id
+  
 }
 
-#Create Internet Gateway
-resource "aws_internet_gateway" "internet_gateway" {
-  vpc_id = aws_vpc.vpc.id
-  tags = {
-    Name = "demo_igw"
+## Security Group Resources
+
+resource "aws_security_group" "alb_security_group" {
+  name        = "alb-security-group"
+  description = "ALB Security Group"
+  vpc_id      = aws_vpc.vpc.id
+
+  ingress {
+    description = "HTTP from Internet"
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+}
+
+resource "aws_security_group" "asg_security_group" {
+  name        = "asg-security-group"
+  description = "ASG Security Group"
+  vpc_id      = aws_vpc.vpc.id
+
+  ingress {
+    description     = "HTTP from ALB"
+    from_port       = 80
+    to_port         = 80
+    protocol        = "tcp"
+    security_groups = [aws_security_group.alb_security_group.id]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
   }
 }
 
-#Create EIP for NAT Gateway
-resource "aws_eip" "nat_gateway_eip" {
-  vpc        = true
-  depends_on = [aws_internet_gateway.internet_gateway]
-  tags = {
-    Name = "demo_igw_eip"
+
+
+## Launch Template and Security Group
+
+resource "aws_launch_template" "launch_template" {
+  name          = "aws-launch-template"
+  image_id      = var.ami
+  instance_type = var.instance_type
+
+  network_interfaces {
+    device_index    = 0
+    security_groups = [aws_security_group.asg_security_group.id]
+  }
+
+}
+
+resource "aws_autoscaling_group" "auto_scaling_group" {
+  desired_capacity    = 2
+  max_size            = 5
+  min_size            = 2
+  vpc_zone_identifier = [for i in aws_subnet.private_subnet[*] : i.id]
+  target_group_arns   = [aws_lb_target_group.lb_target_group.arn]
+
+  launch_template {
+    id      = aws_launch_template.launch_template.id
+    version = aws_launch_template.launch_template.latest_version
   }
 }
 
-#Create NAT Gateway
-resource "aws_nat_gateway" "nat_gateway" {
-  depends_on    = [aws_subnet.public_subnets]
-  allocation_id = aws_eip.nat_gateway_eip.id
-  subnet_id     = aws_subnet.public_subnets["public_subnet_1"].id
-  tags = {
-    Name = "demo_nat_gateway"
-  }
+# ALB Info
+
+resource "aws_lb" "alb" {
+  name               = "private-alb"
+  internal           = false
+  load_balancer_type = "application"
+  security_groups    = [aws_security_group.alb_security_group.id]
+  subnets            = [for i in aws_subnet.public_subnet : i.id]
 }
+
+resource "aws_lb_target_group" "lb_target_group" {
+  name     = "lb-target-group"
+  port     = 80
+  protocol = "HTTP"
+  vpc_id   = aws_vpc.vpc.id
+
+
+}
+
+resource "aws_lb_listener" "alb_listener" {
+  load_balancer_arn = aws_lb.alb.arn
+  port              = "80"
+  protocol          = "HTTP"
+
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.lb_target_group.arn
+  }
+
+
+}
+
+
+output "alb_public_url" {
+  description = "Public URL for Application Load Balancer"
+  value       = aws_lb.alb.dns_name
