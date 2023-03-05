@@ -52,10 +52,15 @@ variable "user_data" {
     
   # Install Apache
 sudo apt update -y
+sudo apt upgrade -y
 sudo apt install -y apache2
+
+sudo ufw allow 'Apache' 
   
   # Start Apache Service
+sudo systemctl enable apache2  
 sudo systemctl start apache2
 
 EOF
 }
+
