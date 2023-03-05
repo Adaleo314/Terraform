@@ -25,6 +25,7 @@ resource "aws_subnet" "private_subnet" {
 }
 
 
+#Route table for public subnets
 resource "aws_route_table" "public_route_table" {
   vpc_id = aws_vpc.vpc.id
 
@@ -34,6 +35,28 @@ resource "aws_route_table" "public_route_table" {
   }
 }
 
+resource "aws_route_table_association" "public_route_assoc" {
+  count          = 2
+  subnet_id      = aws_subnet.public_subnet[count.index].id
+  route_table_id = aws_route_table.public_route_table.id
+}
+
+
+#Route table for private subnets and associate with NAT gateway
+resource "aws_route_table" "private_route_table" {
+  vpc_id = aws_vpc.vpc.id
+
+  route {
+    cidr_block     = "0.0.0.0/0"
+    nat_gateway_id = aws_nat_gateway.nat_gateway.id
+  }
+}
+
+resource "aws_route_table_association" "private_route_assoc" {
+  count          = 2
+  subnet_id      = aws_subnet.private_subnet[count.index].id
+  route_table_id = aws_route_table.private_route_table.id
+}
 
 resource "aws_internet_gateway" "internet_gateway" {
   vpc_id = aws_vpc.vpc.id
@@ -41,6 +64,7 @@ resource "aws_internet_gateway" "internet_gateway" {
     Name = "new_igw"
   }
 }
+
 
 resource "aws_eip" "elastic_ip" {
   vpc        = true
@@ -51,7 +75,6 @@ resource "aws_eip" "elastic_ip" {
 }
 
 
-
 #Create nat gateway for 
 resource "aws_nat_gateway" "nat_gateway" {
   allocation_id     = aws_eip.elastic_ip.id
@@ -59,30 +82,6 @@ resource "aws_nat_gateway" "nat_gateway" {
   subnet_id         = aws_subnet.public_subnet[0].id
 }
 
-
-#Route table for private subnets associated with NAT gateway
-resource "aws_route_table" "private_route_table" {
-  vpc_id = aws_vpc.vpc.id
-
-  route {
-    cidr_block     = "0.0.0.0/0"
-    nat_gateway_id = aws_nat_gateway.nat_gateway.id
-  }
-
-}
-
-resource "aws_route_table_association" "public_route_assoc" {
-  count          = 2
-  subnet_id      = aws_subnet.public_subnet[count.index].id
-  route_table_id = aws_route_table.public_route_table.id
-}
-
-resource "aws_route_table_association" "private_route_assoc" {
-  count          = 2
-  subnet_id      = aws_subnet.private_subnet[count.index].id
-  route_table_id = aws_route_table.private_route_table.id
-
-}
 
 ## Security Group Resources
 
@@ -145,7 +144,7 @@ resource "aws_launch_template" "launch_template" {
   user_data = base64encode("${var.user_data}")
 
   tags = {
-    Name = "asg-ec2"
+    Name = "asg-ec2-template"
   }
 }
 
@@ -157,6 +156,7 @@ resource "aws_autoscaling_group" "auto_scaling_group" {
   min_size            = 2
   vpc_zone_identifier = [for i in aws_subnet.private_subnet[*] : i.id]
   target_group_arns   = [aws_lb_target_group.lb_target_group.arn]
+  name                = "ec2-asg"
 
   launch_template {
     id      = aws_launch_template.launch_template.id
@@ -179,8 +179,6 @@ resource "aws_lb_target_group" "lb_target_group" {
   port     = 80
   protocol = "HTTP"
   vpc_id   = aws_vpc.vpc.id
-
-
 }
 
 resource "aws_lb_listener" "alb_listener" {
@@ -192,8 +190,6 @@ resource "aws_lb_listener" "alb_listener" {
     type             = "forward"
     target_group_arn = aws_lb_target_group.lb_target_group.arn
   }
-
-
 }
 
 
