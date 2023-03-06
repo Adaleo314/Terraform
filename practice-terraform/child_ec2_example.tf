@@ -11,3 +11,12 @@ variable "ami" {
     }
 }
 
+variable "instance_size" {
+    type = "string"
+    default = {
+        "micro" = "t2.micro"
+        "small" = "t2.small"
+        "medium" = "t2.medium"
+        "large" = "t2.large"
+    }
+}
